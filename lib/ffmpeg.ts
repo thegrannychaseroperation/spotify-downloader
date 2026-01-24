@@ -67,8 +67,10 @@ export async function convertMp4ToFlac(input: Uint8Array, onProgress?: ProgressC
     ffmpegEmitter.on("progress", progressHandler);
   }
 
+  const args: string[] = ["-i", inputName, "-map", "0:a:0", "-c:a", "flac", outputName];
+
   try {
-    await ffmpeg.exec(["-i", inputName, "-c:a", "flac", outputName]);
+    await ffmpeg.exec(args);
   } finally {
     if (progressHandler && typeof ffmpegEmitter.off === "function") {
       ffmpegEmitter.off("progress", progressHandler);

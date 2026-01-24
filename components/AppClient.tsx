@@ -40,6 +40,8 @@ import type {
   TrackListResponse,
 } from "../lib/types";
 import { convertMp4ToFlac } from "../lib/ffmpeg";
+import { applyFlacTags } from "../lib/flacTags";
+import type { FlacPicture, FlacTagMetadata } from "../lib/flacTags";
 import { cn } from "../lib/utils";
 
 type DownloadEntry = {
@@ -56,6 +58,12 @@ type DownloadInfoResponse = {
 type DownloadManifestResponse =
   | { kind: "url"; url: string }
   | { kind: "mpd"; segments: { initialization: string; segments: string[] } };
+
+type CoverPayload = {
+  buffer: Uint8Array;
+  mimeType: string;
+  extension: "jpg" | "jpeg" | "png";
+};
 
 type DownloadRowData = {
   entries: DownloadEntry[];
@@ -107,8 +115,11 @@ const STORAGE_PREFIX = "striker";
 const ACTIVE_SESSION_KEY = `${STORAGE_PREFIX}:activeSessionId`;
 const SESSIONS_KEY = `${STORAGE_PREFIX}:sessions`;
 const DOWNLOAD_TEMPLATE_KEY = `${STORAGE_PREFIX}:downloadTemplate`;
+const SINGLE_DOWNLOAD_TEMPLATE_KEY = `${STORAGE_PREFIX}:singleDownloadTemplate`;
+const ZIP_DOWNLOAD_TEMPLATE_KEY = `${STORAGE_PREFIX}:zipDownloadTemplate`;
 const INCLUDE_ALBUM_COVER_KEY = `${STORAGE_PREFIX}:includeAlbumCover`;
-const DEFAULT_DOWNLOAD_TEMPLATE = "{{safeArtistName}}/{{safeAlbumName}} ({{releaseYear}})/{{trackNumber}}. {{safeTrackName}}.flac";
+const DEFAULT_SINGLE_DOWNLOAD_TEMPLATE = "{{artistName}} - {{trackName}}.flac";
+const DEFAULT_ZIP_DOWNLOAD_TEMPLATE = "{{safeArtistName}}/{{safeAlbumName}} ({{releaseYear}})/{{trackNumber}}. {{safeTrackName}}.flac";
 const DEFAULT_ZIP_NAME = "striker-downloads";
 
 type TemplateToken = {
@@ -284,10 +295,10 @@ function buildZipEntryPath(entry: DownloadEntry, template: string): string {
     const sanitized = sanitizeZipPath(rendered);
     return ensureFlacPath(sanitized);
   };
-  const resolvedTemplate = validateDownloadTemplate(template).ok ? template : DEFAULT_DOWNLOAD_TEMPLATE;
+  const resolvedTemplate = validateDownloadTemplate(template).ok ? template : DEFAULT_ZIP_DOWNLOAD_TEMPLATE;
   const candidate = renderPath(resolvedTemplate);
   if (candidate) return candidate;
-  return renderPath(DEFAULT_DOWNLOAD_TEMPLATE) || "track.flac";
+  return renderPath(DEFAULT_ZIP_DOWNLOAD_TEMPLATE) || "track.flac";
 }
 
 function buildAlbumCoverPath(zipEntryPath: string): string | null {
@@ -296,6 +307,23 @@ function buildAlbumCoverPath(zipEntryPath: string): string | null {
   if (segments.length <= 1) return null;
   const folderPath = segments.slice(0, -1).join("/");
   return folderPath ? `${folderPath}/cover.jpg` : null;
+}
+
+function buildFlacMetadata(entry: DownloadEntry): FlacTagMetadata {
+  const title = entry.track.trackName || entry.item.title || "Unknown Track";
+  const artist = entry.track.artistName || entry.item.artist?.name || "Unknown Artist";
+  const album = entry.track.albumName || entry.item.album?.title || "Unknown Album";
+  const date = extractReleaseYear(entry.track.releaseDate);
+  const trackNumber = entry.item.trackNumber ?? entry.index + 1;
+  const trackNumberTag = trackNumber && trackNumber > 0 ? String(trackNumber) : undefined;
+
+  return {
+    title,
+    artist,
+    album,
+    date,
+    trackNumber: trackNumberTag,
+  };
 }
 
 function parseTemplateTokens(template: string): TemplateParseResult {
@@ -648,17 +676,27 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
   const [zipDownloading, setZipDownloading] = useState(false);
   const [zipCancelOpen, setZipCancelOpen] = useState(false);
   const [zipCancelRequested, setZipCancelRequested] = useState(false);
-  const [downloadTemplate, setDownloadTemplate] = useState(() => {
-    if (typeof window === "undefined") return DEFAULT_DOWNLOAD_TEMPLATE;
-    const stored = localStorage.getItem(DOWNLOAD_TEMPLATE_KEY);
-    return stored && stored.trim() ? stored : DEFAULT_DOWNLOAD_TEMPLATE;
+  const [singleDownloadTemplate, setSingleDownloadTemplate] = useState(() => {
+    if (typeof window === "undefined") return DEFAULT_SINGLE_DOWNLOAD_TEMPLATE;
+    const storedSingle = localStorage.getItem(SINGLE_DOWNLOAD_TEMPLATE_KEY);
+    if (storedSingle && storedSingle.trim()) return storedSingle;
+    const storedLegacy = localStorage.getItem(DOWNLOAD_TEMPLATE_KEY);
+    return storedLegacy && storedLegacy.trim() ? storedLegacy : DEFAULT_SINGLE_DOWNLOAD_TEMPLATE;
+  });
+  const [zipDownloadTemplate, setZipDownloadTemplate] = useState(() => {
+    if (typeof window === "undefined") return DEFAULT_ZIP_DOWNLOAD_TEMPLATE;
+    const storedZip = localStorage.getItem(ZIP_DOWNLOAD_TEMPLATE_KEY);
+    if (storedZip && storedZip.trim()) return storedZip;
+    const storedLegacy = localStorage.getItem(DOWNLOAD_TEMPLATE_KEY);
+    return storedLegacy && storedLegacy.trim() ? storedLegacy : DEFAULT_ZIP_DOWNLOAD_TEMPLATE;
   });
   const [includeAlbumCover, setIncludeAlbumCover] = useState(() => {
     if (typeof window === "undefined") return true;
     const stored = localStorage.getItem(INCLUDE_ALBUM_COVER_KEY);
     return stored ? stored === "true" : true;
   });
-  const [templateDraft, setTemplateDraft] = useState(() => downloadTemplate);
+  const [singleTemplateDraft, setSingleTemplateDraft] = useState(() => singleDownloadTemplate);
+  const [zipTemplateDraft, setZipTemplateDraft] = useState(() => zipDownloadTemplate);
   const [includeAlbumCoverDraft, setIncludeAlbumCoverDraft] = useState(() => includeAlbumCover);
   const [autoQueueing, setAutoQueueing] = useState(false);
   const [autoQueueProgress, setAutoQueueProgress] = useState<{ index: number; total: number } | null>(null);
@@ -666,6 +704,7 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
   const [trackListOpen, setTrackListOpen] = useState(false);
   const [trackListLoading, setTrackListLoading] = useState(false);
   const [trackListError, setTrackListError] = useState<string | null>(null);
+  const [trackListSearch, setTrackListSearch] = useState("");
   const [activeSessionId, setActiveSessionId] = useState<string | null>(() => initialSessionId ?? null);
   const [sessions, setSessions] = useState<SessionSummary[]>(() => initialSessions);
   const autoQueueingRef = useRef(false);
@@ -682,6 +721,7 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
   const ignoreRestoreRef = useRef(false);
   const trackListRef = useRef<HTMLDivElement | null>(null);
   const zipCancelRequestedRef = useRef(false);
+  const coverCacheRef = useRef<Map<string, CoverPayload | null>>(new Map());
 
   const replaceSearchParams = useCallback(
     (nextParams: URLSearchParams | Record<string, string>) => {
@@ -717,27 +757,29 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
 
   const currentCover = match.results[0]?.album?.cover ?? null;
   const currentSpotifyUrl = currentTrack ? buildSpotifyUrl(currentTrack.trackUri) : "";
-  const templateValidation = useMemo(() => validateDownloadTemplate(templateDraft), [templateDraft]);
+  const singleTemplateValidation = useMemo(() => validateDownloadTemplate(singleTemplateDraft), [singleTemplateDraft]);
+  const zipTemplateValidation = useMemo(() => validateDownloadTemplate(zipTemplateDraft), [zipTemplateDraft]);
   const previewContext = useMemo(() => {
     const selectedItem = selectedId
       ? match.results.find((item) => String(item.id) === selectedId) ?? null
       : match.results[0] ?? null;
     return buildTemplateContext(currentTrack, selectedItem ?? null, currentTrack ? match.index : null);
   }, [currentTrack, match.results, selectedId]);
-  const templatePreview = useMemo(() => {
-    if (!templateValidation.ok) return null;
-    const rendered = renderTemplate(templateDraft, previewContext);
+  const singleTemplatePreview = useMemo(() => {
+    if (!singleTemplateValidation.ok) return null;
+    const rendered = renderTemplate(singleTemplateDraft, previewContext);
     const sanitized = ensureFlacPath(sanitizeZipPath(rendered));
     const filename = sanitized.split("/").pop() ?? "";
     return filename ? ensureFlacExtension(filename) : null;
-  }, [previewContext, templateDraft, templateValidation.ok]);
-  const templateError = templateValidation.ok ? null : templateValidation.message;
+  }, [previewContext, singleTemplateDraft, singleTemplateValidation.ok]);
+  const singleTemplateError = singleTemplateValidation.ok ? null : singleTemplateValidation.message;
   const zipPathPreview = useMemo(() => {
-    if (!templateValidation.ok) return null;
-    const rendered = renderTemplate(templateDraft, previewContext);
+    if (!zipTemplateValidation.ok) return null;
+    const rendered = renderTemplate(zipTemplateDraft, previewContext);
     const sanitized = sanitizeZipPath(rendered);
     return sanitized ? ensureFlacPath(sanitized) : null;
-  }, [previewContext, templateDraft, templateValidation.ok]);
+  }, [previewContext, zipTemplateDraft, zipTemplateValidation.ok]);
+  const zipTemplateError = zipTemplateValidation.ok ? null : zipTemplateValidation.message;
 
   const normalizeSearch = useCallback((value: string) => {
     return value
@@ -768,6 +810,13 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     const title = entry.track.trackName || "Unknown Track";
     return `${artist} - ${title}`;
   }, []);
+
+  const filteredTrackList = useMemo(() => {
+    if (!trackList) return null;
+    if (!trackListSearch.trim()) return trackList;
+    return trackList.filter((entry) => matchesDownloadSearch(trackListSearch, formatTrackListLabel(entry)));
+  }, [formatTrackListLabel, matchesDownloadSearch, trackList, trackListSearch]);
+  const trackListHasQuery = trackListSearch.trim().length > 0;
 
   const showFfmpegToast = useCallback(
     (entry: DownloadEntry) => {
@@ -844,16 +893,6 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     });
   }, []);
 
-  const triggerDirectDownload = useCallback((url: string) => {
-    const link = document.createElement("a");
-    link.href = url;
-    link.rel = "noopener";
-    link.style.display = "none";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  }, []);
-
   const triggerBlobDownload = useCallback((blob: Blob, filename: string) => {
     const blobUrl = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -868,15 +907,15 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
 
   const buildDownloadFilename = useCallback(
     (entry: DownloadEntry) => {
-      const validation = validateDownloadTemplate(downloadTemplate);
-      const resolvedTemplate = validation.ok ? downloadTemplate : DEFAULT_DOWNLOAD_TEMPLATE;
+      const validation = validateDownloadTemplate(singleDownloadTemplate);
+      const resolvedTemplate = validation.ok ? singleDownloadTemplate : DEFAULT_SINGLE_DOWNLOAD_TEMPLATE;
       const rendered = renderTemplate(resolvedTemplate, buildTemplateContext(entry.track, entry.item, entry.index));
       const sanitizedPath = ensureFlacPath(sanitizeZipPath(rendered));
       const filename = sanitizedPath.split("/").pop() ?? "";
       const fallback = sanitizeFilename(`${entry.track.artistName} - ${entry.track.trackName}.flac`);
       return ensureFlacExtension(filename || fallback || "track.flac");
     },
-    [downloadTemplate]
+    [singleDownloadTemplate]
   );
 
   const fetchSegmentBuffer = useCallback(async (urls: string[]) => {
@@ -903,59 +942,54 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     return combined;
   }, []);
 
-  const downloadConvertedBlob = useCallback(
-    async (entry: DownloadEntry): Promise<Blob> => {
-      if (!sessionId) {
-        throw new Error("No active session.");
-      }
-      const response = await fetch(buildApiUrl(`/api/session/${sessionId}/download/${entry.index}/manifest`));
-      if (!response.ok) {
-        throw new Error(await response.text());
+  const resolveCoverPayload = useCallback(
+    async (entry: DownloadEntry): Promise<CoverPayload | null> => {
+      const coverUrl = entry.item.album.cover ?? null;
+      if (!coverUrl) return null;
+
+      const cache = coverCacheRef.current;
+      if (cache.has(coverUrl)) {
+        return cache.get(coverUrl) ?? null;
       }
 
-      const manifest = (await response.json()) as DownloadManifestResponse;
-      if (manifest.kind === "url") {
-        const streamResponse = await fetch(manifest.url);
-        if (!streamResponse.ok) {
-          throw new Error(`Stream download failed: ${streamResponse.status} ${streamResponse.statusText}`);
-        }
-        return await streamResponse.blob();
-      }
-
-      const segmentUrls = [manifest.segments.initialization, ...manifest.segments.segments];
-      const segmentBuffer = await fetchSegmentBuffer(segmentUrls);
-      showFfmpegToast(entry);
       try {
-        const flacBuffer = await convertMp4ToFlac(segmentBuffer, updateFfmpegToastProgress);
-        const flacCopy = new Uint8Array(flacBuffer);
-        return new Blob([flacCopy.buffer], { type: "audio/flac" });
-      } finally {
-        hideFfmpegToast();
+        const response = await fetch(buildCoverProxyUrl(coverUrl));
+        if (!response.ok) {
+          throw new Error(`Cover download failed: ${response.status} ${response.statusText}`);
+        }
+        const mimeType = response.headers.get("Content-Type") ?? "image/jpeg";
+        if (!mimeType.startsWith("image/")) {
+          throw new Error(`Unsupported cover type: ${mimeType}`);
+        }
+        const extension: CoverPayload["extension"] = mimeType.includes("png")
+          ? "png"
+          : mimeType.includes("jpeg")
+            ? "jpeg"
+            : "jpg";
+        const buffer = new Uint8Array(await response.arrayBuffer());
+        const payload: CoverPayload = { buffer, mimeType, extension };
+        cache.set(coverUrl, payload);
+        return payload;
+      } catch (error) {
+        console.warn(`⚠️ Cover download failed: ${error}`);
+        cache.set(coverUrl, null);
+        return null;
       }
     },
-    [fetchSegmentBuffer, hideFfmpegToast, sessionId, showFfmpegToast, updateFfmpegToastProgress]
-  );
-
-  const downloadConvertedFile = useCallback(
-    async (entry: DownloadEntry) => {
-      const blob = await downloadConvertedBlob(entry);
-      const filename = buildDownloadFilename(entry);
-      triggerBlobDownload(blob, filename);
-    },
-    [buildDownloadFilename, downloadConvertedBlob, triggerBlobDownload]
+    []
   );
 
   const buildDownloadKey = useCallback((index: number, itemId: number) => createDownloadKey(index, itemId), []);
   const buildDownloadUrl = useCallback(
     (index: number) => {
       const params = new URLSearchParams();
-      if (downloadTemplate.trim()) {
-        params.set("template", downloadTemplate);
+      if (singleDownloadTemplate.trim()) {
+        params.set("template", singleDownloadTemplate);
       }
       const query = params.toString();
       return `/api/session/${sessionId ?? ""}/download/${index}${query ? `?${query}` : ""}`;
     },
-    [downloadTemplate, sessionId]
+    [sessionId, singleDownloadTemplate]
   );
 
   const filteredDownloads = useMemo(() => {
@@ -975,54 +1009,79 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     });
   }, [downloadSearch, downloads, matchesDownloadSearch]);
 
-  const handleDownloadEntry = useCallback(
-    async (entry: DownloadEntry) => {
-      if (!sessionId) return;
-      const downloadKey = buildDownloadKey(entry.index, entry.item.id);
-      setEntryDownloadStatus(downloadKey, "checking");
-
-      try {
-        const infoResponse = await fetch(buildApiUrl(`/api/session/${sessionId}/download/${entry.index}/info`));
-        if (!infoResponse.ok) {
-          throw new Error(await infoResponse.text());
-        }
-
-        const info = (await infoResponse.json()) as DownloadInfoResponse;
-        const downloadUrl = buildDownloadUrl(entry.index);
-
-        if (info.requiresConversion) {
-          setEntryDownloadStatus(downloadKey, "converting");
-          await downloadConvertedFile(entry);
-          setEntryDownloadStatus(downloadKey, null);
-          return;
-        }
-
-        setEntryDownloadStatus(downloadKey, null);
-        triggerDirectDownload(downloadUrl);
-      } catch (err) {
-        setEntryDownloadStatus(downloadKey, null);
-        const message = err instanceof Error ? err.message : "Download failed.";
-        setError(message);
-      }
-    },
-    [buildDownloadKey, buildDownloadUrl, downloadConvertedFile, sessionId, setEntryDownloadStatus, triggerDirectDownload]
-  );
-
-  const fetchDownloadBlob = useCallback(
-    async (entry: DownloadEntry): Promise<{ blob: Blob; requiresConversion: boolean }> => {
+  const fetchDownloadInfo = useCallback(
+    async (trackIndex: number): Promise<DownloadInfoResponse> => {
       if (!sessionId) {
         throw new Error("No active session.");
       }
-      const infoResponse = await fetch(buildApiUrl(`/api/session/${sessionId}/download/${entry.index}/info`));
+
+      const infoResponse = await fetch(buildApiUrl(`/api/session/${sessionId}/download/${trackIndex}/info`));
       if (!infoResponse.ok) {
         throw new Error(await infoResponse.text());
       }
 
-      const info = (await infoResponse.json()) as DownloadInfoResponse;
+      return (await infoResponse.json()) as DownloadInfoResponse;
+    },
+    [sessionId]
+  );
+
+  const fetchDownloadBlob = useCallback(
+    async (entry: DownloadEntry, infoOverride?: DownloadInfoResponse): Promise<Blob> => {
+      if (!sessionId) {
+        throw new Error("No active session.");
+      }
+
+      const info = infoOverride ?? (await fetchDownloadInfo(entry.index));
+      const metadata = buildFlacMetadata(entry);
+      const coverPayload = await resolveCoverPayload(entry);
+      const coverForTags: FlacPicture | null = coverPayload
+        ? { buffer: coverPayload.buffer, mimeType: coverPayload.mimeType }
+        : null;
 
       if (info.requiresConversion) {
-        const blob = await downloadConvertedBlob(entry);
-        return { blob, requiresConversion: true };
+        const response = await fetch(buildApiUrl(`/api/session/${sessionId}/download/${entry.index}/manifest`));
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+
+        const manifest = (await response.json()) as DownloadManifestResponse;
+        const segmentUrls = manifest.kind === "mpd"
+          ? [manifest.segments.initialization, ...manifest.segments.segments]
+          : [];
+
+        let sourceBuffer: Uint8Array;
+
+        if (manifest.kind === "url") {
+          const streamResponse = await fetch(manifest.url);
+          if (!streamResponse.ok) {
+            throw new Error(`Stream download failed: ${streamResponse.status} ${streamResponse.statusText}`);
+          }
+          sourceBuffer = new Uint8Array(await streamResponse.arrayBuffer());
+        } else {
+          sourceBuffer = await fetchSegmentBuffer(segmentUrls);
+        }
+
+        showFfmpegToast(entry);
+        try {
+          const flacBuffer = await convertMp4ToFlac(sourceBuffer, updateFfmpegToastProgress);
+          const tagged = applyFlacTags(flacBuffer, metadata, coverForTags);
+          const flacCopy = new Uint8Array(tagged);
+          return new Blob([flacCopy.buffer], { type: "audio/flac" });
+        } catch (error) {
+          console.warn(`⚠️ Conversion with metadata failed (mp4): ${error}`);
+          try {
+            const fallbackBuffer = await convertMp4ToFlac(sourceBuffer, updateFfmpegToastProgress);
+            const taggedFallback = applyFlacTags(fallbackBuffer, metadata, null);
+            const fallbackCopy = new Uint8Array(taggedFallback);
+            setError("Tagging failed for a track; delivered without cover art.");
+            return new Blob([fallbackCopy.buffer], { type: "audio/flac" });
+          } catch (fallbackError) {
+            console.warn(`⚠️ Conversion fallback failed (mp4): ${fallbackError}`);
+            throw error instanceof Error ? error : new Error("Conversion failed.");
+          }
+        } finally {
+          hideFfmpegToast();
+        }
       }
 
       const downloadUrl = buildDownloadUrl(entry.index);
@@ -1030,10 +1089,68 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
       if (!response.ok) {
         throw new Error(`Download failed: ${response.status} ${response.statusText}`);
       }
-      const blob = await response.blob();
-      return { blob, requiresConversion: false };
+      const buffer = new Uint8Array(await response.arrayBuffer());
+
+      try {
+        const taggedBuffer = applyFlacTags(buffer, metadata, coverForTags);
+        const taggedCopy = new Uint8Array(taggedBuffer);
+        return new Blob([taggedCopy.buffer], { type: "audio/flac" });
+      } catch (error) {
+        console.warn(`⚠️ Tagging failed (flac): ${error}`);
+        try {
+          const fallbackBuffer = applyFlacTags(buffer, metadata, null);
+          const fallbackCopy = new Uint8Array(fallbackBuffer);
+          setError("Tagging failed for a track; delivered without cover art.");
+          return new Blob([fallbackCopy.buffer], { type: "audio/flac" });
+        } catch (fallbackError) {
+          console.warn(`⚠️ Tagging fallback failed (flac): ${fallbackError}`);
+          // Last resort: return original buffer so download still completes.
+          setError("Tagging failed; delivered original audio without metadata.");
+          return new Blob([buffer.buffer], { type: "audio/flac" });
+        }
+      }
     },
-    [buildDownloadUrl, downloadConvertedBlob, sessionId]
+    [
+      buildDownloadUrl,
+      fetchDownloadInfo,
+      fetchSegmentBuffer,
+      hideFfmpegToast,
+      resolveCoverPayload,
+      sessionId,
+      setError,
+      showFfmpegToast,
+      updateFfmpegToastProgress,
+    ]
+  );
+
+  const handleDownloadEntry = useCallback(
+    async (entry: DownloadEntry) => {
+      if (!sessionId) return;
+      const downloadKey = buildDownloadKey(entry.index, entry.item.id);
+      setEntryDownloadStatus(downloadKey, "checking");
+
+      try {
+        const info = await fetchDownloadInfo(entry.index);
+        setEntryDownloadStatus(downloadKey, "converting");
+        const blob = await fetchDownloadBlob(entry, info);
+        const filename = buildDownloadFilename(entry);
+        triggerBlobDownload(blob, filename);
+        setEntryDownloadStatus(downloadKey, null);
+      } catch (err) {
+        setEntryDownloadStatus(downloadKey, null);
+        const message = err instanceof Error ? err.message : "Download failed.";
+        setError(message);
+      }
+    },
+    [
+      buildDownloadFilename,
+      buildDownloadKey,
+      fetchDownloadBlob,
+      fetchDownloadInfo,
+      sessionId,
+      setEntryDownloadStatus,
+      triggerBlobDownload,
+    ]
   );
 
   const releaseYear = useCallback((date: string) => {
@@ -1090,17 +1207,28 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     (open: boolean) => {
       setSettingsOpen(open);
       if (open) {
-        setTemplateDraft(downloadTemplate);
+        setSingleTemplateDraft(singleDownloadTemplate);
+        setZipTemplateDraft(zipDownloadTemplate);
         setIncludeAlbumCoverDraft(includeAlbumCover);
       }
     },
-    [downloadTemplate, includeAlbumCover]
+    [includeAlbumCover, singleDownloadTemplate, zipDownloadTemplate]
   );
-  const saveDownloadTemplate = useCallback((value: string) => {
+  const saveSingleTemplate = useCallback((value: string) => {
     const next = value.trim();
     if (!next) return;
-    setDownloadTemplate(next);
+    setSingleDownloadTemplate(next);
     if (typeof window !== "undefined") {
+      localStorage.setItem(SINGLE_DOWNLOAD_TEMPLATE_KEY, next);
+      localStorage.setItem(DOWNLOAD_TEMPLATE_KEY, next);
+    }
+  }, []);
+  const saveZipTemplate = useCallback((value: string) => {
+    const next = value.trim();
+    if (!next) return;
+    setZipDownloadTemplate(next);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(ZIP_DOWNLOAD_TEMPLATE_KEY, next);
       localStorage.setItem(DOWNLOAD_TEMPLATE_KEY, next);
     }
   }, []);
@@ -1111,14 +1239,16 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     }
   }, []);
   const handleSaveTemplate = useCallback(() => {
-    const validation = validateDownloadTemplate(templateDraft);
-    if (!validation.ok) {
+    const singleValidation = validateDownloadTemplate(singleTemplateDraft);
+    const zipValidation = validateDownloadTemplate(zipTemplateDraft);
+    if (!singleValidation.ok || !zipValidation.ok) {
       return;
     }
-    saveDownloadTemplate(templateDraft);
+    saveSingleTemplate(singleTemplateDraft);
+    saveZipTemplate(zipTemplateDraft);
     saveIncludeAlbumCover(includeAlbumCoverDraft);
     setSettingsOpen(false);
-  }, [includeAlbumCoverDraft, saveDownloadTemplate, saveIncludeAlbumCover, templateDraft]);
+  }, [includeAlbumCoverDraft, saveSingleTemplate, saveIncludeAlbumCover, saveZipTemplate, singleTemplateDraft, zipTemplateDraft]);
   const loadSessions = useCallback(async () => {
     const response = await fetch(buildApiUrl("/api/sessions"));
     if (!response.ok) {
@@ -1391,12 +1521,12 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
         showZipToast(entry, i + 1, downloads.length);
 
         try {
-          const { blob, requiresConversion } = await fetchDownloadBlob(entry);
+          const blob = await fetchDownloadBlob(entry);
           if (zipCancelRequestedRef.current) {
             cancelled = true;
             break;
           }
-          const zipEntryName = buildZipEntryPath(entry, downloadTemplate);
+          const zipEntryName = buildZipEntryPath(entry, zipDownloadTemplate);
           await zipWriter.add(zipEntryName, new BlobReader(blob));
           if (includeAlbumCover) {
             const coverPath = buildAlbumCoverPath(zipEntryName);
@@ -1448,7 +1578,7 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
       zipCancelRequestedRef.current = false;
       hideZipToast();
     }
-  }, [currentSession?.filename, downloadTemplate, downloads, fetchDownloadBlob, hideZipToast, includeAlbumCover, sessionId, setError, showZipToast, triggerBlobDownload, zipDownloading]);
+  }, [currentSession?.filename, downloads, fetchDownloadBlob, hideZipToast, includeAlbumCover, sessionId, setError, showZipToast, triggerBlobDownload, zipDownloadTemplate, zipDownloading]);
 
   useEffect(() => {
     autoQueueingRef.current = autoQueueing;
@@ -1758,7 +1888,13 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     setTrackList(null);
     setTrackListOpen(false);
     setTrackListError(null);
+    setTrackListSearch("");
   }, [sessionId]);
+
+  useEffect(() => {
+    if (trackListOpen) return;
+    setTrackListSearch("");
+  }, [trackListOpen]);
 
   useEffect(() => {
     if (!trackListOpen) return;
@@ -1853,17 +1989,67 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
                                 {activeTotalTracks ? `${activeTotalTracks.toLocaleString()} total` : "Total unknown"}
                               </p>
                             </div>
-                            <div className="max-h-72 overflow-y-auto px-2 py-2">
+                            <div className="border-b border-white/10 px-3 py-2">
+                              <div className="relative">
+                                <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-white/50">
+                                  <svg
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="1.6"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    className="h-3.5 w-3.5"
+                                    aria-hidden="true"
+                                  >
+                                    <circle cx="11" cy="11" r="7" />
+                                    <path d="M20 20l-3.5-3.5" />
+                                  </svg>
+                                </span>
+                                <Input
+                                  value={trackListSearch}
+                                  onChange={(event) => setTrackListSearch(event.target.value)}
+                                  placeholder="Search tracks"
+                                  aria-label="Search tracks"
+                                  className="h-8 pl-7 pr-8 text-xs"
+                                />
+                                {trackListHasQuery && (
+                                  <button
+                                    type="button"
+                                    className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-full text-white/60 transition hover:bg-white/10 hover:text-white"
+                                    onClick={() => setTrackListSearch("")}
+                                    aria-label="Clear track search"
+                                  >
+                                    <svg
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="1.8"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      className="h-3.5 w-3.5"
+                                      aria-hidden="true"
+                                    >
+                                      <path d="M18 6L6 18" />
+                                      <path d="M6 6l12 12" />
+                                    </svg>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="scroll-area max-h-72 overflow-y-auto px-2 py-2">
                               {trackListLoading && <p className="px-2 py-3 text-xs text-white/60">Loading tracks...</p>}
                               {!trackListLoading && trackListError && (
                                 <p className="px-2 py-3 text-xs text-rose-200">{trackListError}</p>
                               )}
-                              {!trackListLoading && !trackListError && (!trackList || trackList.length === 0) && (
-                                <p className="px-2 py-3 text-xs text-white/60">No tracks found.</p>
+                              {!trackListLoading && !trackListError && (!filteredTrackList || filteredTrackList.length === 0) && (
+                                <p className="px-2 py-3 text-xs text-white/60">
+                                  {trackListHasQuery ? "No tracks match this search." : "No tracks found."}
+                                </p>
                               )}
-                              {!trackListLoading && !trackListError && trackList && trackList.length > 0 && (
+                              {!trackListLoading && !trackListError && filteredTrackList && filteredTrackList.length > 0 && (
                                 <div className="flex flex-col gap-1">
-                                  {trackList.map((entry) => {
+                                  {filteredTrackList.map((entry) => {
                                     const isCurrent = entry.index === match.index;
                                     const isQueued = downloadIndexSet.has(entry.index);
                                     return (
@@ -2396,13 +2582,64 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
                   <DialogHeader>
                     <DialogTitle>Download settings</DialogTitle>
                     <DialogDescription>
-                      Customize download filenames and zip folder structure with Handlebars-style tokens. Use "/" to create folders
-                      for the zip; direct downloads use the final filename segment.
+                      Set separate naming templates for single downloads and zip builds. Use "/" to create folders in zip
+                      downloads; single downloads only use the final filename segment.
                     </DialogDescription>
                   </DialogHeader>
-                  <div className="scroll-area mt-4 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
+                  <div className="scroll-area mt-4 flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto pr-1">
                     <div className="flex flex-col gap-2">
-                      <p className="text-xs uppercase text-white/50">Zip extras</p>
+                      <p className="text-xs uppercase text-white/50">Single downloads</p>
+                      <p className="text-xs text-pretty text-white/60">
+                        Used when you download one track. Only the filename segment is applied.
+                      </p>
+                      <label className="text-xs uppercase text-white/50" htmlFor="single-download-template">
+                        Single download template
+                      </label>
+                      <Input
+                        id="single-download-template"
+                        value={singleTemplateDraft}
+                        onChange={(event) => setSingleTemplateDraft(event.target.value)}
+                        aria-invalid={Boolean(singleTemplateError)}
+                        aria-describedby={singleTemplateError ? "single-download-template-error" : "single-download-template-help"}
+                        placeholder={DEFAULT_SINGLE_DOWNLOAD_TEMPLATE}
+                      />
+                      <p id="single-download-template-help" className="text-xs text-pretty text-white/60">
+                        Keep the .flac extension at the end of the filename.
+                      </p>
+                      {singleTemplateError && (
+                        <p id="single-download-template-error" className="text-xs text-pretty text-rose-200">
+                          {singleTemplateError}
+                        </p>
+                      )}
+                      <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-3">
+                        <p className="text-xs uppercase text-white/50">Filename preview</p>
+                        <p className="mt-2 text-sm text-white/80 font-mono tabular-nums break-words">
+                          {singleTemplatePreview ?? "Preview updates once the template is valid."}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <p className="text-xs uppercase text-white/50">Zip downloads</p>
+                      <p className="text-xs text-pretty text-white/60">Used to build folder paths inside the zip archive.</p>
+                      <label className="text-xs uppercase text-white/50" htmlFor="zip-download-template">
+                        Zip download template
+                      </label>
+                      <Input
+                        id="zip-download-template"
+                        value={zipTemplateDraft}
+                        onChange={(event) => setZipTemplateDraft(event.target.value)}
+                        aria-invalid={Boolean(zipTemplateError)}
+                        aria-describedby={zipTemplateError ? "zip-download-template-error" : "zip-download-template-help"}
+                        placeholder={DEFAULT_ZIP_DOWNLOAD_TEMPLATE}
+                      />
+                      <p id="zip-download-template-help" className="text-xs text-pretty text-white/60">
+                        Use "/" to create folders. Keep the .flac extension at the end of the path.
+                      </p>
+                      {zipTemplateError && (
+                        <p id="zip-download-template-error" className="text-xs text-pretty text-rose-200">
+                          {zipTemplateError}
+                        </p>
+                      )}
                       <div className="flex items-center gap-3 text-sm text-white/80">
                         <Checkbox
                           id="include-album-cover"
@@ -2416,58 +2653,31 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
                       <p className="text-xs text-pretty text-white/60">
                         Adds a cover.jpg file to each album folder when creating zip downloads.
                       </p>
-                    </div>
-                    <div className="flex flex-col gap-2">
-                      <label className="text-xs uppercase text-white/50" htmlFor="download-template">
-                        Download template
-                      </label>
-                      <Input
-                        id="download-template"
-                        value={templateDraft}
-                        onChange={(event) => setTemplateDraft(event.target.value)}
-                        aria-invalid={Boolean(templateError)}
-                        aria-describedby={templateError ? "download-template-error" : "download-template-help"}
-                        placeholder={DEFAULT_DOWNLOAD_TEMPLATE}
-                      />
-                      <p id="download-template-help" className="text-xs text-pretty text-white/60">
-                        Use double curly braces with the tokens below. Keep the .flac extension at the end of the path.
-                      </p>
-                      {templateError && (
-                        <p id="download-template-error" className="text-xs text-pretty text-rose-200">
-                          {templateError}
+                      <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-3">
+                        <p className="text-xs uppercase text-white/50">Zip path preview</p>
+                        <p className="mt-2 text-sm text-white/80 font-mono tabular-nums break-words">
+                          {zipPathPreview ?? "Preview updates once the template is valid."}
                         </p>
-                      )}
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-white/60">
-                        <span>Need the full token list?</span>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="h-7 px-2 text-[11px]"
-                          onClick={() => setTokenDialogOpen(true)}
-                        >
-                          View tokens
-                        </Button>
                       </div>
                     </div>
-                    <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-3">
-                      <p className="text-xs uppercase text-white/50">Filename preview</p>
-                      <p className="mt-2 text-sm text-white/80 font-mono tabular-nums break-words">
-                        {templatePreview ?? "Preview updates once the template is valid."}
-                      </p>
-                    </div>
-                    <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-3">
-                      <p className="text-xs uppercase text-white/50">Zip path preview</p>
-                      <p className="mt-2 text-sm text-white/80 font-mono tabular-nums break-words">
-                        {zipPathPreview ?? "Preview updates once the template is valid."}
-                      </p>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-white/60">
+                      <span>Need the full token list?</span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 text-[11px]"
+                        onClick={() => setTokenDialogOpen(true)}
+                      >
+                        View tokens
+                      </Button>
                     </div>
                   </div>
                   <DialogFooter className="mt-6 border-t border-white/10 pt-4">
                     <DialogClose asChild>
                       <Button variant="ghost">Cancel</Button>
                     </DialogClose>
-                    <Button onClick={handleSaveTemplate} disabled={!templateValidation.ok}>
+                    <Button onClick={handleSaveTemplate} disabled={!singleTemplateValidation.ok || !zipTemplateValidation.ok}>
                       Save settings
                     </Button>
                   </DialogFooter>
