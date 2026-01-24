@@ -654,8 +654,9 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     return stored && stored.trim() ? stored : DEFAULT_DOWNLOAD_TEMPLATE;
   });
   const [includeAlbumCover, setIncludeAlbumCover] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem(INCLUDE_ALBUM_COVER_KEY) === "true";
+    if (typeof window === "undefined") return true;
+    const stored = localStorage.getItem(INCLUDE_ALBUM_COVER_KEY);
+    return stored ? stored === "true" : true;
   });
   const [templateDraft, setTemplateDraft] = useState(() => downloadTemplate);
   const [includeAlbumCoverDraft, setIncludeAlbumCoverDraft] = useState(() => includeAlbumCover);
