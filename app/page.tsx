@@ -5,7 +5,7 @@ import { listWebSessions } from "../src/db";
 export const dynamic = "force-dynamic";
 
 type PageProps = {
-  searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 };
 
 function resolveParam(value?: string | string[]): string | null {
