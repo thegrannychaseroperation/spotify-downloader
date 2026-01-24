@@ -1,3 +1,4 @@
+import { readFile } from "fs/promises";
 import type { Track } from "./types";
 
 export function parseCSV(csvContent: string): Track[] {
@@ -60,7 +61,6 @@ export function parseCSV(csvContent: string): Track[] {
 }
 
 export async function readCSVFile(filePath: string): Promise<Track[]> {
-  const file = Bun.file(filePath);
-  const content = await file.text();
+  const content = await readFile(filePath, "utf8");
   return parseCSV(content);
 }

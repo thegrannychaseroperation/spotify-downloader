@@ -4,34 +4,23 @@ This file orients coding agents working in this repo.
 Keep guidance aligned with current code and tooling.
 
 ## Repository overview
-- Runtime: Bun + TypeScript (ESM).
-- Source lives in `src/` and is executed directly with Bun.
-- No build step or bundler configured in `package.json`.
-- Local data files: `Liked_Songs.csv`, `.cache/download-cache.sqlite`, `downloads/`.
-- Do not edit user data in `downloads/` or `.cache/` unless explicitly asked.
+- Runtime: Node.js + Next.js (App Router) + TypeScript (ESM).
+- Source lives in `src/` for backend logic and `app/` + `components/` for the UI.
+- Local data files: `Liked_Songs.csv`, `downloads/`.
+- Do not edit user data in `downloads/` unless explicitly asked.
 
-## Required rules (Cursor)
-- Default to Bun instead of Node.js.
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`.
-- Use `bun test` instead of `jest` or `vitest`.
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`.
-- Use `bun install` instead of `npm install` or `pnpm install`.
-- Use `bun run <script>` instead of `npm run <script>`.
-- Use `bunx <package> <command>` instead of `npx <package> <command>`.
-- Bun automatically loads `.env`, so do not add dotenv.
-- Prefer Bun APIs (`Bun.file`, `Bun.write`, `Bun.spawn`, `bun:sqlite`).
+## Package manager
+- Use `pnpm` for installs and scripts.
 
 ## Install
-- `bun install`
+- `pnpm install`
 
 ## Run
-- Main entry: `bun run src/index.ts`
-- Direct file execution is acceptable: `bun src/index.ts`
+- `pnpm dev`
 
 ## Build
-- No build scripts are defined.
-- If a build is needed for experiments, use Bun’s bundler:
-- Example: `bun build src/index.ts --outdir dist`
+- `pnpm build`
+- `pnpm start`
 
 ## Lint
 - No linting tooling configured.
@@ -39,15 +28,17 @@ Keep guidance aligned with current code and tooling.
 
 ## Tests
 - No tests are currently defined.
-- Run all tests (when added): `bun test`
-- Run a single test file: `bun test path/to/file.test.ts`
 - Keep tests colocated with sources when introduced.
+
+## Frontend + server expectations
+- Use Next.js App Router for pages and API route handlers.
+- Avoid introducing a separate server framework unless required.
 
 ## TypeScript configuration
 - Strict mode enabled (`strict: true`).
-- `moduleResolution: bundler` and `allowImportingTsExtensions: true`.
+- `moduleResolution: bundler`.
 - ESM only (`"type": "module"` in `package.json`).
-- No emit (`noEmit: true`); run directly via Bun.
+- No emit (`noEmit: true`).
 
 ## Code style conventions
 - Indentation: 2 spaces.
@@ -58,7 +49,7 @@ Keep guidance aligned with current code and tooling.
 
 ## Imports
 - Order imports as:
-- 1) Node/Bun built-ins (`fs/promises`, `bun:sqlite`).
+- 1) Node built-ins (`fs/promises`, `child_process`).
 - 2) Third-party packages (`drizzle-orm`).
 - 3) Local modules (`./config`).
 - Use `import type` for type-only imports.
@@ -93,14 +84,14 @@ Keep guidance aligned with current code and tooling.
 - Keep log messages short and actionable.
 
 ## File system usage
-- Prefer `Bun.file` / `Bun.write` for file I/O.
-- Use `fs/promises` only for tasks not covered by Bun APIs (mkdir/unlink).
+- Use `fs/promises` and `fs` for file I/O.
 - Always call `ensureDirectoryExists` before writing.
 - Sanitize filenames with `sanitizeFilename` when building paths.
+- Use `child_process.spawn` for shell commands.
 
 ## Data and persistence
-- SQLite cache is stored at `.cache/download-cache.sqlite`.
-- Use `drizzle-orm` with `bun:sqlite`.
+- PostgreSQL is configured via `DATABASE_URL`.
+- Use `drizzle-orm` with `pg`.
 - Schema management happens in `src/db.ts`.
 - Keep DB interactions centralized; avoid ad hoc SQL elsewhere.
 
@@ -131,11 +122,9 @@ Keep guidance aligned with current code and tooling.
 - Prefer environment variables if new secrets are required.
 
 ## Common pitfalls
-- Do not invoke Node-only APIs; stick with Bun.
-- Avoid adding bundlers (Vite/Webpack) unless explicitly requested.
+- Avoid Bun-only APIs and dependencies.
 - Avoid writing into `downloads/` for tests or fixtures.
 
 ## Suggested verification steps
-- Manual run: `bun run src/index.ts`
+- Manual run: `pnpm dev`
 - Smoke test: validate CSV parsing with a small sample file.
-- For future tests: add a minimal `*.test.ts` and run `bun test`.

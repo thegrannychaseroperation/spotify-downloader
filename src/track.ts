@@ -1,6 +1,10 @@
-import { unlink } from "fs/promises";
+import { createWriteStream, constants } from "fs";
+import { access, rename, unlink, writeFile } from "fs/promises";
+import { spawn } from "child_process";
+import { finished } from "stream/promises";
 import { TRACK_API_BASE_URL, DEFAULT_AUDIO_QUALITY, DOWNLOADS_FOLDER } from "./config";
 import { ensureDirectoryExists, sanitizeFilename } from "./filesystem";
+import { decodeManifest, parseMpdSegmentUrls, type ManifestResult } from "./manifest";
 import type { Track } from "./types";
 
 type ManifestResponse = {
@@ -9,24 +13,6 @@ type ManifestResponse = {
     trackId: number;
     manifest: string;
   };
-};
-
-type ManifestPayload = {
-  mimeType: string;
-  codecs: string;
-  encryptionType: string;
-  urls: string[];
-};
-
-type ManifestResult =
-  | { kind: "url"; url: string }
-  | { kind: "mpd"; buffer: Uint8Array };
-
-type SegmentTemplate = {
-  initialization: string;
-  media: string;
-  startNumber: number;
-  timeline: Array<{ d: number; r: number }>;
 };
 
 function extractReleaseYear(releaseDate: string): string {
@@ -51,11 +37,29 @@ function buildDownloadPath(track: Track, trackNumber?: number): { directory: str
 
   const directory = `${DOWNLOADS_FOLDER}/${artist}/${album} (${year})`;
   const prefix = formatTrackNumber(trackNumber);
-  const filename = `${prefix} ${trackName}.flac`;
+  const filename = `${prefix}. ${trackName}.flac`;
   const fullPath = `${directory}/${filename}`;
 
   return { directory, filename, fullPath };
 }
+
+export async function trackFileExists(track: Track, trackNumber?: number): Promise<boolean> {
+  const { fullPath } = buildDownloadPath(track, trackNumber);
+  return fileExists(fullPath);
+}
+
+type TrackMetadata = {
+  title: string;
+  artist: string;
+  album: string;
+  trackNumber?: number;
+};
+
+type DownloadOptions = {
+  trackNumber?: number;
+  metadata?: TrackMetadata;
+  coverPath?: string | null;
+};
 
 function buildCoverUrl(coverId?: string | null): string | null {
   if (!coverId) {
@@ -64,105 +68,6 @@ function buildCoverUrl(coverId?: string | null): string | null {
 
   const normalized = coverId.replace(/-/g, "/");
   return `https://resources.tidal.com/images/${normalized}/1280x1280.jpg`;
-}
-
-function decodeManifest(manifest: string): ManifestResult | null {
-  const decodedBuffer = Buffer.from(manifest, "base64");
-  const decodedText = decodedBuffer.toString("utf8").trim();
-  if (decodedText.startsWith("<")) {
-    return { kind: "mpd", buffer: decodedBuffer };
-  }
-
-  try {
-    const payload = JSON.parse(decodedText) as ManifestPayload;
-    const url = payload.urls?.[0];
-    if (!url) {
-      return null;
-    }
-
-    return { kind: "url", url };
-  } catch {
-    return null;
-  }
-}
-
-function parseAttributes(source: string): Record<string, string> {
-  const attributes: Record<string, string> = {};
-  const regex = /(\w+)="([^"]*)"/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(source))) {
-    const key = match[1];
-    if (key) {
-      attributes[key] = match[2] ?? "";
-    }
-  }
-
-  return attributes;
-}
-
-function parseSegmentTemplate(xml: string): SegmentTemplate | null {
-  const templateMatch = xml.match(/<SegmentTemplate\s+([^>]+)>/);
-  if (!templateMatch?.[1]) {
-    return null;
-  }
-
-  const templateAttributes = parseAttributes(templateMatch[1]);
-  const initialization = templateAttributes.initialization;
-  const media = templateAttributes.media;
-  const startNumber = Number(templateAttributes.startNumber ?? "1");
-
-  if (!initialization || !media) {
-    return null;
-  }
-
-  const timelineMatch = xml.match(/<SegmentTimeline>([\s\S]*?)<\/SegmentTimeline>/);
-  if (!timelineMatch?.[1]) {
-    return null;
-  }
-
-  const timeline: Array<{ d: number; r: number }> = [];
-  for (const match of timelineMatch[1].matchAll(/<S\s+([^/>]+)\/?\s*>/g)) {
-    if (!match[1]) continue;
-    const attrs = parseAttributes(match[1]);
-    const d = Number(attrs.d ?? "0");
-    const r = Number(attrs.r ?? "0");
-    if (!Number.isFinite(d) || d <= 0) continue;
-    timeline.push({ d, r: Number.isFinite(r) ? r : 0 });
-  }
-
-  if (timeline.length === 0) {
-    return null;
-  }
-
-  return {
-    initialization,
-    media,
-    startNumber: Number.isFinite(startNumber) && startNumber > 0 ? startNumber : 1,
-    timeline,
-  };
-}
-
-function buildSegmentUrls(template: SegmentTemplate): { initialization: string; segments: string[] } | null {
-  if (!template.media.includes("$Number$")) {
-    return null;
-  }
-
-  const segments: string[] = [];
-  let currentNumber = template.startNumber;
-
-  for (const entry of template.timeline) {
-    const repeat = entry.r >= 0 ? entry.r + 1 : 1;
-    for (let i = 0; i < repeat; i++) {
-      segments.push(template.media.replace("$Number$", String(currentNumber)));
-      currentNumber++;
-    }
-  }
-
-  return {
-    initialization: template.initialization,
-    segments,
-  };
 }
 
 export async function getTrackStreamUrl(trackId: number, quality: string = DEFAULT_AUDIO_QUALITY): Promise<ManifestResult | null> {
@@ -177,9 +82,66 @@ export async function getTrackStreamUrl(trackId: number, quality: string = DEFAU
   return decodeManifest(data.data.manifest);
 }
 
-export async function downloadTrackFile(track: Track, stream: ManifestResult, trackNumber?: number): Promise<void> {
+function buildMetadataArgs(metadata: TrackMetadata): string[] {
+  const args: string[] = [
+    "-metadata",
+    `title=${metadata.title}`,
+    "-metadata",
+    `artist=${metadata.artist}`,
+    "-metadata",
+    `album=${metadata.album}`,
+  ];
+
+  if (metadata.trackNumber && metadata.trackNumber > 0) {
+    args.push("-metadata", `track=${metadata.trackNumber}`);
+  }
+
+  return args;
+}
+
+async function writeTaggedFlac(
+  inputPath: string,
+  outputPath: string,
+  metadata: TrackMetadata,
+  coverPath?: string | null,
+): Promise<void> {
+  const shouldIncludeCover = coverPath ? await fileExists(coverPath) : false;
+  const args = ["ffmpeg", "-y", "-i", inputPath];
+
+  if (shouldIncludeCover && coverPath) {
+    args.push(
+      "-i",
+      coverPath,
+      "-map",
+      "0:a",
+      "-map",
+      "1:v",
+      "-c:v",
+      "mjpeg",
+      "-disposition:v",
+      "attached_pic",
+      "-metadata:s:v",
+      "title=Album cover",
+      "-metadata:s:v",
+      "comment=Cover (front)",
+    );
+  } else {
+    args.push("-map", "0:a");
+  }
+
+  args.push("-c:a", "copy", ...buildMetadataArgs(metadata), outputPath);
+  await runProcess(args);
+}
+
+export async function downloadTrackFile(
+  track: Track,
+  stream: ManifestResult,
+  { trackNumber, metadata, coverPath }: DownloadOptions = {},
+): Promise<void> {
   const { directory, fullPath } = buildDownloadPath(track, trackNumber);
   await ensureDirectoryExists(directory);
+
+  const shouldTag = metadata !== undefined;
 
   if (stream.kind === "url") {
     const response = await fetch(stream.url);
@@ -188,27 +150,39 @@ export async function downloadTrackFile(track: Track, stream: ManifestResult, tr
     }
 
     const buffer = await response.arrayBuffer();
-    await Bun.write(fullPath, buffer);
-    console.log(`Saved: ${fullPath}`);
+    if (!shouldTag || !metadata) {
+      await writeFile(fullPath, Buffer.from(buffer));
+      console.log(`Saved: ${fullPath}`);
+      return;
+    }
+
+    const tempPath = `${directory}/temp-${Date.now()}.flac`;
+    await writeFile(tempPath, Buffer.from(buffer));
+    try {
+      await writeTaggedFlac(tempPath, fullPath, metadata, coverPath);
+      console.log(`Saved: ${fullPath}`);
+    } finally {
+      await unlink(tempPath).catch(() => undefined);
+    }
     return;
   }
 
   console.log("Using MPD manifest (manual segments)");
   const mpdPath = `${directory}/manifest.mpd`;
-  await Bun.write(mpdPath, stream.buffer);
+  await writeFile(mpdPath, Buffer.from(stream.buffer));
   const mpdText = Buffer.from(stream.buffer).toString("utf8");
-  const segmentTemplate = parseSegmentTemplate(mpdText);
-  const segmentUrls = segmentTemplate ? buildSegmentUrls(segmentTemplate) : null;
+  const segmentUrls = parseMpdSegmentUrls(mpdText);
 
   if (!segmentUrls) {
     throw new Error("MPD parsing failed; unable to derive segment URLs");
   }
 
   const segmentPath = `${directory}/segments.mp4`;
+  const tempOutputPath = `${directory}/temp-${Date.now()}.flac`;
   let completed = false;
 
   try {
-    const sink = Bun.file(segmentPath).writer();
+    const sink = createWriteStream(segmentPath);
     for (const url of [segmentUrls.initialization, ...segmentUrls.segments]) {
       const response = await fetch(url);
       if (!response.ok) {
@@ -218,29 +192,20 @@ export async function downloadTrackFile(track: Track, stream: ManifestResult, tr
       const buffer = new Uint8Array(await response.arrayBuffer());
       sink.write(buffer);
     }
-    await sink.end();
+    sink.end();
+    await finished(sink);
 
-    const process = Bun.spawn(
-      [
-        "ffmpeg",
-        "-y",
-        "-i",
-        segmentPath,
-        "-c:a",
-        "flac",
-        fullPath,
-      ],
-      {
-        stdout: "inherit",
-        stderr: "inherit",
-      }
-    );
-    const exitCode = await process.exited;
+    await runProcess(["ffmpeg", "-y", "-i", segmentPath, "-c:a", "flac", tempOutputPath]);
 
-    if (exitCode !== 0) {
-      throw new Error(`ffmpeg failed (${exitCode})`);
+    if (!shouldTag || !metadata) {
+      await rename(tempOutputPath, fullPath);
+      console.log(`Saved: ${fullPath}`);
+      completed = true;
+      return;
     }
 
+    await writeTaggedFlac(tempOutputPath, fullPath, metadata, coverPath);
+    await unlink(tempOutputPath).catch(() => undefined);
     console.log(`Saved: ${fullPath}`);
     completed = true;
   } finally {
@@ -254,14 +219,22 @@ export async function downloadTrackFile(track: Track, stream: ManifestResult, tr
   }
 }
 
-export async function downloadCoverArt(track: Track, coverId?: string | null): Promise<void> {
+export async function downloadCoverArt(track: Track, coverId?: string | null): Promise<string | null> {
   const coverUrl = buildCoverUrl(coverId);
   if (!coverUrl) {
-    return;
+    return null;
   }
 
   const { directory } = buildDownloadPath(track);
   await ensureDirectoryExists(directory);
+
+  const coverPath = `${directory}/cover.jpg`;
+  try {
+    await access(coverPath, constants.F_OK);
+    return coverPath;
+  } catch {
+    // continue
+  }
 
   const response = await fetch(coverUrl);
   if (!response.ok) {
@@ -269,7 +242,31 @@ export async function downloadCoverArt(track: Track, coverId?: string | null): P
   }
 
   const buffer = await response.arrayBuffer();
-  const coverPath = `${directory}/cover.jpg`;
-  await Bun.write(coverPath, buffer);
+  await writeFile(coverPath, Buffer.from(buffer));
   console.log(`Saved: ${coverPath}`);
+  return coverPath;
+}
+
+async function runProcess(args: string[]): Promise<void> {
+  const [command, ...commandArgs] = args;
+  await new Promise<void>((resolve, reject) => {
+    const process = spawn(command ?? "", commandArgs, { stdio: "inherit" });
+    process.on("error", (error) => reject(error));
+    process.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`ffmpeg failed (${code ?? "unknown"})`));
+      }
+    });
+  });
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path, constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }

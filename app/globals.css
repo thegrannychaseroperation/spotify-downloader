@@ -1,0 +1,89 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    @apply bg-zinc-950 text-white font-sans min-h-dvh m-0;
+  }
+
+  #__next {
+    @apply min-h-dvh overflow-x-hidden;
+  }
+}
+
+@media (min-width: 768px) {
+  html,
+  body {
+    @apply h-full overflow-hidden;
+  }
+
+  #__next {
+    @apply h-full overflow-hidden;
+  }
+}
+
+.scroll-area {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.2) transparent;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.scroll-area::-webkit-scrollbar {
+  width: 8px;
+}
+
+.scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scroll-area::-webkit-scrollbar-thumb {
+  background-color: rgb(255 255 255 / 0.2);
+  border-radius: 999px;
+}
+
+.download-item-enter {
+  animation: download-item-slide 320ms ease;
+}
+
+.download-item-exit {
+  animation: none;
+}
+
+@keyframes download-item-slide {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.progress-indeterminate {
+  animation: progress-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-60%);
+  }
+  100% {
+    transform: translateX(260%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .download-item-enter {
+    animation: none;
+  }
+
+  .download-item-exit {
+    animation: none;
+  }
+}
