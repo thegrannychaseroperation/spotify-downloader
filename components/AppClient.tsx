@@ -28,6 +28,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { RadioGroup, RadioGroupItem } from "./ui/radio-group";
+import { Switch } from "./ui/switch";
 import { Toast } from "./ui/toaster";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import type {
@@ -2686,29 +2687,18 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
                       <div className="mt-3 flex flex-col gap-2">
                         <p className="text-xs uppercase text-white/50">Metadata</p>
                         <p className="text-xs text-pretty text-white/60">
-                          Choose which number is written as the track "#" tag (TRACKNUMBER).
+                          Track "#" tag source (TRACKNUMBER)
                         </p>
-                        <div className="flex flex-col gap-2 text-sm text-white/80">
-                          <label className="flex items-center gap-3">
-                            <input
-                              type="radio"
-                              name="track-number-tag-source"
-                              value="album"
-                              checked={trackNumberTagSourceDraft === "album"}
-                              onChange={() => setTrackNumberTagSourceDraft("album")}
-                            />
-                            Use album track number
-                          </label>
-                          <label className="flex items-center gap-3">
-                            <input
-                              type="radio"
-                              name="track-number-tag-source"
-                              value="csv"
-                              checked={trackNumberTagSourceDraft === "csv"}
-                              onChange={() => setTrackNumberTagSourceDraft("csv")}
-                            />
-                            Use CSV position
-                          </label>
+                        <div className="flex items-center justify-between gap-4 rounded-lg border border-white/10 bg-white/5 px-4 py-3">
+                          <div className="flex flex-col">
+                            <p className="text-sm text-white/80">Use CSV position</p>
+                            <p className="text-xs text-white/60">When enabled, tags use the track's 1-based row number in the CSV.</p>
+                          </div>
+                          <Switch
+                            checked={trackNumberTagSourceDraft === "csv"}
+                            onCheckedChange={(checked) => setTrackNumberTagSourceDraft(checked ? "csv" : "album")}
+                            aria-label="Toggle CSV position as track number tag"
+                          />
                         </div>
                       </div>
                       <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-3">
