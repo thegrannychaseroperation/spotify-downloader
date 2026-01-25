@@ -2689,17 +2689,17 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
                         <p className="text-xs text-pretty text-white/60">
                           Track "#" tag source (TRACKNUMBER)
                         </p>
-                        <div className="flex items-center justify-between gap-4 rounded-lg border border-white/10 bg-white/5 px-4 py-3">
-                          <div className="flex flex-col">
-                            <p className="text-sm text-white/80">Use CSV position</p>
-                            <p className="text-xs text-white/60">When enabled, tags use the track's 1-based row number in the CSV.</p>
-                          </div>
+                        <div className="flex items-center gap-3 text-sm text-white/80">
                           <Switch
                             checked={trackNumberTagSourceDraft === "csv"}
                             onCheckedChange={(checked) => setTrackNumberTagSourceDraft(checked ? "csv" : "album")}
                             aria-label="Toggle CSV position as track number tag"
                           />
+                          <span>Use CSV position</span>
                         </div>
+                        <p className="text-xs text-pretty text-white/60">
+                          When enabled, tags use the track's 1-based row number in the CSV.
+                        </p>
                       </div>
                       <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-3">
                         <p className="text-xs uppercase text-white/50">Zip path preview</p>
