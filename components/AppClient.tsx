@@ -208,6 +208,12 @@ const TEMPLATE_TOKENS: TemplateToken[] = [
     example: "42",
   },
   {
+    token: "csvNumber",
+    label: "CSV number",
+    description: "Alias of csvTrackNumber.",
+    example: "42",
+  },
+  {
     token: "year",
     label: "Year",
     description: "Alias of releaseYear.",
@@ -254,6 +260,7 @@ const SAMPLE_TEMPLATE_CONTEXT = {
   safeAlbumName: "Sample Album",
   releaseYear: "2024",
   csvTrackNumber: "12",
+  csvNumber: "12",
   year: "2024",
   trackUri: "spotify:track:1ZMiCix7XSAbfAJlEZWMCp",
   tidalTrackId: "12345678",
@@ -424,6 +431,7 @@ function buildTemplateContext(track: Track | null, item: SearchTrackItem | null,
   const tidalArtistName = item?.artist?.name || "Unknown Artist";
   const releaseYear = extractReleaseYear(track.releaseDate);
   const csvTrackNumber = csvIndex !== null ? String(csvIndex + 1) : "";
+  const csvNumber = csvTrackNumber;
 
   return {
     trackNumber: paddedTrackNumber,
@@ -437,6 +445,7 @@ function buildTemplateContext(track: Track | null, item: SearchTrackItem | null,
     safeAlbumName: sanitizeFilename(albumName),
     releaseYear,
     csvTrackNumber,
+    csvNumber,
     year: releaseYear,
     trackUri: track.trackUri || "",
     tidalTrackId: item?.id ? String(item.id) : "",
