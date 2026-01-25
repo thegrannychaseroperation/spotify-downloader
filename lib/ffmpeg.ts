@@ -1,9 +1,10 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { toBlobURL } from "@ffmpeg/util";
 
 let ffmpegPromise: Promise<FFmpeg> | null = null;
 const CORE_VERSION = "0.12.10";
-const CORE_BASE_URL = `https://unpkg.com/@ffmpeg/core@${CORE_VERSION}/dist/esm`;
+// Use UMD build so ffmpeg's worker can load it via importScripts.
+// The ESM build path can trigger a dynamic import() fallback that breaks under Next/Webpack.
+const CORE_BASE_URL = `https://unpkg.com/@ffmpeg/core@${CORE_VERSION}/dist/umd`;
 
 type FfmpegProgress = {
   progress?: number;
@@ -22,11 +23,11 @@ async function loadFfmpeg(): Promise<FFmpeg> {
   if (!ffmpegPromise) {
     ffmpegPromise = (async () => {
       const ffmpeg = new FFmpeg();
-      const coreBlobURL = await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.js`, "text/javascript");
-      const wasmBlobURL = await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.wasm`, "application/wasm");
+      // Provide explicit URLs for core/wasm/worker so the worker can importScripts() the UMD core.
       await ffmpeg.load({
-        coreURL: coreBlobURL,
-        wasmURL: wasmBlobURL,
+        coreURL: `${CORE_BASE_URL}/ffmpeg-core.js`,
+        wasmURL: `${CORE_BASE_URL}/ffmpeg-core.wasm`,
+        workerURL: `${CORE_BASE_URL}/ffmpeg-core.worker.js`,
       });
       return ffmpeg;
     })();

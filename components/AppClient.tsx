@@ -28,6 +28,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { RadioGroup, RadioGroupItem } from "./ui/radio-group";
+import { Switch } from "./ui/switch";
 import { Toast } from "./ui/toaster";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import type {
@@ -118,6 +119,7 @@ const DOWNLOAD_TEMPLATE_KEY = `${STORAGE_PREFIX}:downloadTemplate`;
 const SINGLE_DOWNLOAD_TEMPLATE_KEY = `${STORAGE_PREFIX}:singleDownloadTemplate`;
 const ZIP_DOWNLOAD_TEMPLATE_KEY = `${STORAGE_PREFIX}:zipDownloadTemplate`;
 const INCLUDE_ALBUM_COVER_KEY = `${STORAGE_PREFIX}:includeAlbumCover`;
+const TRACK_NUMBER_TAG_SOURCE_KEY = `${STORAGE_PREFIX}:trackNumberTagSource`;
 const DEFAULT_SINGLE_DOWNLOAD_TEMPLATE = "{{artistName}} - {{trackName}}.flac";
 const DEFAULT_ZIP_DOWNLOAD_TEMPLATE = "{{safeArtistName}}/{{safeAlbumName}} ({{releaseYear}})/{{trackNumber}}. {{safeTrackName}}.flac";
 const DEFAULT_ZIP_NAME = "striker-downloads";
@@ -128,6 +130,8 @@ type TemplateToken = {
   description: string;
   example: string;
 };
+
+type TrackNumberTagSource = "album" | "csv";
 
 type TemplateParseResult = {
   tokens: string[];
@@ -208,6 +212,12 @@ const TEMPLATE_TOKENS: TemplateToken[] = [
     example: "42",
   },
   {
+    token: "csvNumber",
+    label: "CSV number",
+    description: "Alias of csvTrackNumber.",
+    example: "42",
+  },
+  {
     token: "year",
     label: "Year",
     description: "Alias of releaseYear.",
@@ -254,6 +264,7 @@ const SAMPLE_TEMPLATE_CONTEXT = {
   safeAlbumName: "Sample Album",
   releaseYear: "2024",
   csvTrackNumber: "12",
+  csvNumber: "12",
   year: "2024",
   trackUri: "spotify:track:1ZMiCix7XSAbfAJlEZWMCp",
   tidalTrackId: "12345678",
@@ -309,12 +320,15 @@ function buildAlbumCoverPath(zipEntryPath: string): string | null {
   return folderPath ? `${folderPath}/cover.jpg` : null;
 }
 
-function buildFlacMetadata(entry: DownloadEntry): FlacTagMetadata {
+function buildFlacMetadata(entry: DownloadEntry, trackNumberSource: TrackNumberTagSource): FlacTagMetadata {
   const title = entry.track.trackName || entry.item.title || "Unknown Track";
   const artist = entry.track.artistName || entry.item.artist?.name || "Unknown Artist";
   const album = entry.track.albumName || entry.item.album?.title || "Unknown Album";
   const date = extractReleaseYear(entry.track.releaseDate);
-  const trackNumber = entry.item.trackNumber ?? entry.index + 1;
+
+  const albumTrackNumber = entry.item.trackNumber;
+  const csvTrackNumber = entry.index + 1;
+  const trackNumber = trackNumberSource === "csv" ? csvTrackNumber : albumTrackNumber ?? csvTrackNumber;
   const trackNumberTag = trackNumber && trackNumber > 0 ? String(trackNumber) : undefined;
 
   return {
@@ -424,6 +438,7 @@ function buildTemplateContext(track: Track | null, item: SearchTrackItem | null,
   const tidalArtistName = item?.artist?.name || "Unknown Artist";
   const releaseYear = extractReleaseYear(track.releaseDate);
   const csvTrackNumber = csvIndex !== null ? String(csvIndex + 1) : "";
+  const csvNumber = csvTrackNumber;
 
   return {
     trackNumber: paddedTrackNumber,
@@ -437,6 +452,7 @@ function buildTemplateContext(track: Track | null, item: SearchTrackItem | null,
     safeAlbumName: sanitizeFilename(albumName),
     releaseYear,
     csvTrackNumber,
+    csvNumber,
     year: releaseYear,
     trackUri: track.trackUri || "",
     tidalTrackId: item?.id ? String(item.id) : "",
@@ -695,9 +711,15 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     const stored = localStorage.getItem(INCLUDE_ALBUM_COVER_KEY);
     return stored ? stored === "true" : true;
   });
+  const [trackNumberTagSource, setTrackNumberTagSource] = useState<TrackNumberTagSource>(() => {
+    if (typeof window === "undefined") return "album";
+    const stored = localStorage.getItem(TRACK_NUMBER_TAG_SOURCE_KEY);
+    return stored === "csv" ? "csv" : "album";
+  });
   const [singleTemplateDraft, setSingleTemplateDraft] = useState(() => singleDownloadTemplate);
   const [zipTemplateDraft, setZipTemplateDraft] = useState(() => zipDownloadTemplate);
   const [includeAlbumCoverDraft, setIncludeAlbumCoverDraft] = useState(() => includeAlbumCover);
+  const [trackNumberTagSourceDraft, setTrackNumberTagSourceDraft] = useState<TrackNumberTagSource>(() => trackNumberTagSource);
   const [autoQueueing, setAutoQueueing] = useState(false);
   const [autoQueueProgress, setAutoQueueProgress] = useState<{ index: number; total: number } | null>(null);
   const [trackList, setTrackList] = useState<TrackListEntry[] | null>(null);
@@ -1032,7 +1054,7 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
       }
 
       const info = infoOverride ?? (await fetchDownloadInfo(entry.index));
-      const metadata = buildFlacMetadata(entry);
+      const metadata = buildFlacMetadata(entry, trackNumberTagSource);
       const coverPayload = await resolveCoverPayload(entry);
       const coverForTags: FlacPicture | null = coverPayload
         ? { buffer: coverPayload.buffer, mimeType: coverPayload.mimeType }
@@ -1210,9 +1232,10 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
         setSingleTemplateDraft(singleDownloadTemplate);
         setZipTemplateDraft(zipDownloadTemplate);
         setIncludeAlbumCoverDraft(includeAlbumCover);
+        setTrackNumberTagSourceDraft(trackNumberTagSource);
       }
     },
-    [includeAlbumCover, singleDownloadTemplate, zipDownloadTemplate]
+    [includeAlbumCover, singleDownloadTemplate, trackNumberTagSource, zipDownloadTemplate]
   );
   const saveSingleTemplate = useCallback((value: string) => {
     const next = value.trim();
@@ -1238,6 +1261,12 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
       localStorage.setItem(INCLUDE_ALBUM_COVER_KEY, String(value));
     }
   }, []);
+  const saveTrackNumberTagSource = useCallback((value: TrackNumberTagSource) => {
+    setTrackNumberTagSource(value);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(TRACK_NUMBER_TAG_SOURCE_KEY, value);
+    }
+  }, []);
   const handleSaveTemplate = useCallback(() => {
     const singleValidation = validateDownloadTemplate(singleTemplateDraft);
     const zipValidation = validateDownloadTemplate(zipTemplateDraft);
@@ -1247,8 +1276,9 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
     saveSingleTemplate(singleTemplateDraft);
     saveZipTemplate(zipTemplateDraft);
     saveIncludeAlbumCover(includeAlbumCoverDraft);
+    saveTrackNumberTagSource(trackNumberTagSourceDraft);
     setSettingsOpen(false);
-  }, [includeAlbumCoverDraft, saveSingleTemplate, saveIncludeAlbumCover, saveZipTemplate, singleTemplateDraft, zipTemplateDraft]);
+  }, [includeAlbumCoverDraft, saveSingleTemplate, saveIncludeAlbumCover, saveZipTemplate, saveTrackNumberTagSource, singleTemplateDraft, trackNumberTagSourceDraft, zipTemplateDraft]);
   const loadSessions = useCallback(async () => {
     const response = await fetch(buildApiUrl("/api/sessions"));
     if (!response.ok) {
@@ -2653,6 +2683,24 @@ function AppClient({ initialSessions, initialSessionId, initialMatch, initialDow
                       <p className="text-xs text-pretty text-white/60">
                         Adds a cover.jpg file to each album folder when creating zip downloads.
                       </p>
+
+                      <div className="mt-3 flex flex-col gap-2">
+                        <p className="text-xs uppercase text-white/50">Metadata</p>
+                        <p className="text-xs text-pretty text-white/60">
+                          Track "#" tag source (TRACKNUMBER)
+                        </p>
+                        <div className="flex items-center gap-3 text-sm text-white/80">
+                          <Switch
+                            checked={trackNumberTagSourceDraft === "csv"}
+                            onCheckedChange={(checked) => setTrackNumberTagSourceDraft(checked ? "csv" : "album")}
+                            aria-label="Toggle CSV position as track number tag"
+                          />
+                          <span>Use CSV position</span>
+                        </div>
+                        <p className="text-xs text-pretty text-white/60">
+                          When enabled, tags use the track's 1-based row number in the CSV.
+                        </p>
+                      </div>
                       <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-3">
                         <p className="text-xs uppercase text-white/50">Zip path preview</p>
                         <p className="mt-2 text-sm text-white/80 font-mono tabular-nums break-words">

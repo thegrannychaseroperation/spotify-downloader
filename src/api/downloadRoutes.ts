@@ -22,6 +22,7 @@ const ALLOWED_TEMPLATE_TOKENS = new Set([
   "year",
   "trackUri",
   "csvTrackNumber",
+  "csvNumber",
   "tidalTrackId",
   "tidalArtistName",
   "tidalAlbumName",
@@ -126,6 +127,7 @@ function buildDownloadName(track: Track, item: SearchTrackItem, template: string
   const albumName = track.albumName || item.album.title || "Unknown Album";
   const releaseYear = extractReleaseYear(track.releaseDate);
   const csvTrackNumber = String(csvIndex + 1);
+  const csvNumber = csvTrackNumber;
   const resolvedTemplate = template && template.trim() ? template.trim() : DEFAULT_DOWNLOAD_TEMPLATE;
   const rendered = renderTemplate(resolvedTemplate, {
     trackNumber: paddedTrackNumber,
@@ -141,6 +143,7 @@ function buildDownloadName(track: Track, item: SearchTrackItem, template: string
     year: releaseYear,
     trackUri: track.trackUri || "",
     csvTrackNumber,
+    csvNumber,
     tidalTrackId: String(item.id),
     tidalArtistName: item.artist.name || "",
     tidalAlbumName: item.album.title || "",
